@@ -17,6 +17,12 @@ class SmartFeaturesExtractor():
         caffe.set_device(device)
         self.net = caffe.Net(arch_path,model_path,caffe.TEST)
     
+    def has_processes(self):
+        for p in self.processes:
+            if p.is_alive():
+                return True
+        return False
+
     def terminate_processes(self):
         self.running = False
         for p in self.processes:
@@ -41,7 +47,7 @@ class SmartFeaturesExtractor():
 
         while not task_queue.empty() or not done_queue.empty():
             print "Get images from done queue..."
-            while done_queue.qsize() < batch_size:
+            while done_queue.qsize() < batch_size and self.has_processes():
                 print "Waitting for image buffer...", done_queue.qsize()
                 time.sleep(1)
 
