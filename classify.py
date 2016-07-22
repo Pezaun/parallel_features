@@ -47,7 +47,7 @@ class SmartFeaturesExtractor():
 
         while not task_queue.empty() or not done_queue.empty():
             print "Get images from done queue..."
-            while done_queue.qsize() < batch_size and self.has_processes():
+            while done_queue.qsize() < batch_size and task_queue.qsize() > 0:
                 print "Waitting for image buffer...", done_queue.qsize()
                 time.sleep(1)
 
@@ -82,7 +82,7 @@ class SmartFeaturesExtractor():
             im_data = SmartFeaturesExtractor.resize_image(im_data, input_size)
             im_data -= means
             im_data = im_data.transpose(2,0,1)[np.newaxis,:,:,:]
-            while output_task.qsize() > 500 and self.running:
+            while output_task.qsize() >= 500 and self.running:
                 time.sleep(1)
             output_task.put((im_name, im_data))
 
