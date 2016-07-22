@@ -37,7 +37,7 @@ class SmartFeaturesExtractor():
         for image_name in files:
             task_queue.put(image_name)
     
-        NUMBER_OF_PROCESSES = 6
+        NUMBER_OF_PROCESSES = 1
 
         self.processes = [0] * NUMBER_OF_PROCESSES
         for i in range(NUMBER_OF_PROCESSES):
@@ -54,17 +54,26 @@ class SmartFeaturesExtractor():
             batch = []
             print "Task Queue:", task_queue.qsize()
             print "Done Queue:", done_queue.qsize()
-            while done_queue.qsize() > 0 and len(batch) < batch_size:
-                batch += [done_queue.get()]
+            
+            if done_queue.qsize() < batch_size:
+                self.net.blobs['data'].reshape(done_queue.qsize(),3,input_size,input_size)
+            else:
+                self.net.blobs['data'].reshape(batch_size,3,input_size,input_size)
+            batch_index = 0
+            while done_queue.qsize() > 0 and batch_index < batch_size:
+                data = done_queue.get()
+                batch += [data[0]]
+                self.net.blobs['data'].data[batch_index,:,:,:] = data[1]
+                batch_index += 1
 
-            self.net.blobs['data'].reshape(len(batch),3,input_size,input_size)
-            for i, im_data in enumerate(batch):            
-                self.net.blobs['data'].data[i,:,:,:] = im_data[1]
+            # self.net.blobs['data'].reshape(len(batch),3,input_size,input_size)
+            # for i, im_data in enumerate(batch):            
+            #     self.net.blobs['data'].data[i,:,:,:] = im_data[1]
 
             print "Pred..."
             out = self.net.forward()            
             for i, im_data in enumerate(batch):            
-                print im_data[0], out['prob'][i]            
+                print im_data, out['prob'][i]            
 
     def image_reader(self, base, input_size, input_tasks, output_task):
         means = np.asarray([116,136,169]).astype(np.float32)
