@@ -9,10 +9,10 @@ import time
 from multiprocessing import Process, Queue, current_process, freeze_support
 from sklearn.metrics import accuracy_score
 from abc import ABCMeta, abstractmethod
+import pickle
 
 class SmartFeaturesExtractor():
     def __init__(self):
-        # self.running = True
         self.job_maker = None
     
     def set_job_maker(self, job_maker):
@@ -58,7 +58,7 @@ class SmartFeaturesExtractor():
         for i in range(NUMBER_OF_PROCESSES):
             self.processes[i] = Process(target=self.image_reader, args=(base_path, input_size, self.task_queue, self.done_queue))
             self.processes[i].start()
-            print "Process", i
+            print "Starting process", i, "..."
 
         while not self.task_queue.empty() or not self.done_queue.empty():
             while self.done_queue.qsize() < batch_size and self.task_queue.qsize() > 0:
@@ -117,24 +117,72 @@ class SmartFeaturesExtractor():
 
 class AJob:
     __metaclass__ = ABCMeta
-    
+
     @abstractmethod
     def do_the_job(self, data_dic):
         raise NotImplementedError()
 
 class SaveFeatures(AJob):
+    def __init__(self, out_path):
+        self.y_batch = []
+        self.y_pred = []
+        self.scores = []
+        self.file_names = []
+        self.layers = []
+        self.out_path = out_path
+        self.out_files = []
+        self.layers_dic = {}
+
+    def create_out_files(self):
+        for layer in self.layers:
+            self.out_files += [open(os.path.join(self.out_path, layer.replace("/","_") + ".fet"), "w+")]
+            self.layers_dic[layer] = {}
+        pass
+
+    def save(self):
+        for i, layer in enumerate(self.layers):
+            pickle.dump( self.layers_dic[layer],  self.out_files[i])
+            self.out_files[i].close()
+
+    def add_layer(self, layer):
+        self.layers += [layer]
+
+    def do_the_job(self, data_dic):
+        self.file_names += data_dic["file_name"]
+        batch_file_names = data_dic["file_name"]
+        net = data_dic["net"]
+        for layer in self.layers:
+            print layer, net.blobs[layer].data.shape            
+            for i, file_name in enumerate(batch_file_names):
+                self.layers_dic[layer][file_name] = net.blobs[layer].data[i]
+                print file_name, net.blobs[layer].data[i].shape
+
+class PredScore(AJob):
     def __init__(self):
         self.y_batch = []
         self.y_pred = []
+        self.scores = []
+        self.file_names = []
+
+    def get_scores_dic(self):
+        dic = {}
+        for name, scores in zip(self.file_names, self.scores):
+            dic[name] = scores
+        return dic
+
+    def predictions(self):
+        for name, scores, y_pred in zip(self.file_names, self.scores, self.y_pred):
+            print name, scores, y_pred
 
     def do_the_job(self, data_dic):
-        file_names = data_dic["file_name"]
+        self.file_names += data_dic["file_name"]
+        batch_file_names = data_dic["file_name"]
         net = data_dic["net"]
         self.y_pred += net.blobs['prob'].data.argmax(axis=1).tolist()
+        self.scores += net.blobs['prob'].data.tolist()
         self.y_batch += data_dic["y_pred"]
         y_real = data_dic["y"]
-        for i, im_data in enumerate(file_names):            
-            print file_names[i], net.blobs['prob'].data[i]
+        
         if len(self.y_batch) != len(y_real):
             return
         print "Final ACC:", accuracy_score(self.y_pred, self.y_batch)
@@ -155,7 +203,12 @@ if __name__ == "__main__":
     out_layers = args.OUTPUT_LAYERS.split(',')    
 
     sfs = SmartFeaturesExtractor()
-    sfs.set_job_maker(SaveFeatures())
+    # p_score = PredScore()
+    save_f = SaveFeatures(args.FEATURES_OUTPUT_PATH)
+    save_f.add_layer("pool5/7x7_s1")    
+    # save_f.add_layer("inception_5b/pool")
+    save_f.create_out_files()
+    sfs.set_job_maker(save_f)
     try:
         sfs.create_network(args.MODEL_PATH, args.ARCH_PATH, int(args.GPU_DEVICE))
         sfs.forward(sfs.load_input_list(args.IMAGES_PATH, args.IMAGES_INDEX), int(args.IMAGE_SIZE), int(args.BATCH_SIZE))
@@ -163,5 +216,10 @@ if __name__ == "__main__":
         print "EXCEPTION:"
         for e in sys.exc_info():
             print e
+
+    save_f.save()
+    # preds = p_score.get_scores_dic()
+    # for k in sorted(preds):
+    #     print k, preds[k]
     sfs.terminate_processes()
     sys.exit(0)
