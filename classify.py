@@ -8,27 +8,29 @@ import sys
 import time
 from multiprocessing import Process, Queue, current_process, freeze_support
 from sklearn.metrics import accuracy_score
+from abc import ABCMeta, abstractmethod
 
 class SmartFeaturesExtractor():
     def __init__(self):
-        self.running = True
+        # self.running = True
+        self.job_maker = None
     
+    def set_job_maker(self, job_maker):
+        self.job_maker = job_maker
+
     def create_network(self, model_path, arch_path, device):
         caffe.set_mode_gpu()
         caffe.set_device(device)
         self.net = caffe.Net(arch_path,model_path,caffe.TEST)
-    
-    def has_processes(self):
-        for p in self.processes:
-            if p.is_alive():
-                return True
-        return False
 
     def terminate_processes(self):
-        self.running = False
+        self.running = False        
         for p in self.processes:
             if p.is_alive():
                 p.terminate()
+
+        self.done_queue.close()
+        self.task_queue.close()        
 
     @staticmethod
     def load_input_list(images_path, index_path):
@@ -40,66 +42,57 @@ class SmartFeaturesExtractor():
         X, y = map(list,zip(*lines))
         return (images_path, X, y)
 
-    def predict(self, input_data, input_size, batch_size):
+    def forward(self, input_data, input_size, batch_size):
         base_path = input_data[0]
         X = input_data[1]
         Y = input_data[2] if len(input_data) == 3 else [None] * len(X)
         X_pred = []
-        task_queue = Queue()
-        done_queue = Queue()
+        self.task_queue = Queue()
+        self.done_queue = Queue()
         for x,y in zip(X,Y):
-            task_queue.put((x,y))
+            self.task_queue.put((x,y))
     
-        NUMBER_OF_PROCESSES = 6
+        NUMBER_OF_PROCESSES = 4
 
         self.processes = [0] * NUMBER_OF_PROCESSES
         for i in range(NUMBER_OF_PROCESSES):
-            self.processes[i] = Process(target=self.image_reader, args=(base_path, input_size, task_queue, done_queue))
+            self.processes[i] = Process(target=self.image_reader, args=(base_path, input_size, self.task_queue, self.done_queue))
             self.processes[i].start()
             print "Process", i
 
-        cl = [0,0]
-        correct = 0
-        while not task_queue.empty() or not done_queue.empty():
-            while done_queue.qsize() < batch_size and task_queue.qsize() > 0:
+        while not self.task_queue.empty() or not self.done_queue.empty():
+            while self.done_queue.qsize() < batch_size and self.task_queue.qsize() > 0:
                 time.sleep(1)
 
             batch_name = []
             batch_y = []
-            if done_queue.qsize() < batch_size:
-                self.net.blobs['data'].reshape(done_queue.qsize(),3,input_size,input_size)
+            if self.done_queue.qsize() < batch_size:
+                self.net.blobs['data'].reshape(self.done_queue.qsize(),3,input_size,input_size)
             else:
                 self.net.blobs['data'].reshape(batch_size,3,input_size,input_size)
             batch_index = 0
-            while done_queue.qsize() > 0 and batch_index < batch_size:
-                data = done_queue.get()
+            while self.done_queue.qsize() > 0 and batch_index < batch_size:
+                data = self.done_queue.get()
                 batch_name += [data[0]]                
                 self.net.blobs['data'].data[batch_index,:,:,:] = data[1]
                 batch_y += [data[2]]
                 batch_index += 1
 
-            out = self.net.forward()            
-            for i, im_data in enumerate(batch_name):            
-                print im_data, out['prob'][i]
-                cl[np.argmax(out['prob'][i])] += 1
-            
-            X_pred += out['prob'].argmax(axis=1).tolist()
-            print "Partial ACC:", accuracy_score(X_pred, Y[:len(X_pred)])
-            print "Batch ACC:", accuracy_score(out['prob'].argmax(axis=1), batch_y)            
-            print "Missing %d from %d images. Classification count: %d %d" %(len(X) - sum(cl), len(X), cl[0], cl[1]) 
-        print "Final ACC:", accuracy_score(X_pred, Y)
-
+            out = self.net.forward()
+            self.job_maker.do_the_job({"net":self.net, "file_name":batch_name, "y_pred":batch_y, "y":Y})            
+        
     def image_reader(self, base, input_size, input_tasks, output_task):
         means = np.asarray([116,136,169]).astype(np.float32)
-        for task in iter(input_tasks.get, 'STOP'):
+        while not input_tasks.empty():
+            task = input_tasks.get()
             im_name = task[0]
             im_class = task[1]
             im_data = cv2.imread(os.path.join(base, task[0])).astype(np.float32)
-            im_data = SmartFeaturesExtractor.resize_image(im_data, input_size)
+            im_data = SmartFeaturesExtractor.resize_image(im_data, input_size)            
             im_data -= means
             im_data = im_data.transpose(2,0,1)[np.newaxis,:,:,:]
-            while output_task.qsize() >= 500 and self.running:
-                time.sleep(1)
+            while output_task.qsize() >= 500:
+                time.sleep(1)                
             output_task.put((im_name, im_data, im_class))
 
     @staticmethod
@@ -122,6 +115,29 @@ class SmartFeaturesExtractor():
             img = img[:,crop / 2:new_min_dim + (crop / 2)]
         return img
 
+class AJob:
+    __metaclass__ = ABCMeta
+    
+    @abstractmethod
+    def do_the_job(self, data_dic):
+        raise NotImplementedError()
+
+class SaveFeatures(AJob):
+    def __init__(self):
+        self.y_batch = []
+        self.y_pred = []
+
+    def do_the_job(self, data_dic):
+        file_names = data_dic["file_name"]
+        net = data_dic["net"]
+        self.y_pred += net.blobs['prob'].data.argmax(axis=1).tolist()
+        self.y_batch += data_dic["y_pred"]
+        y_real = data_dic["y"]
+        for i, im_data in enumerate(file_names):            
+            print file_names[i], net.blobs['prob'].data[i]
+        if len(self.y_batch) != len(y_real):
+            return
+        print "Final ACC:", accuracy_score(self.y_pred, self.y_batch)
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
@@ -139,9 +155,13 @@ if __name__ == "__main__":
     out_layers = args.OUTPUT_LAYERS.split(',')    
 
     sfs = SmartFeaturesExtractor()
+    sfs.set_job_maker(SaveFeatures())
     try:
         sfs.create_network(args.MODEL_PATH, args.ARCH_PATH, int(args.GPU_DEVICE))
-        sfs.predict(sfs.load_input_list(args.IMAGES_PATH, args.IMAGES_INDEX), int(args.IMAGE_SIZE), int(args.BATCH_SIZE))
+        sfs.forward(sfs.load_input_list(args.IMAGES_PATH, args.IMAGES_INDEX), int(args.IMAGE_SIZE), int(args.BATCH_SIZE))
     except:
-        print "EXCEPTION!", sys.exc_info()[1]        
+        print "EXCEPTION:"
+        for e in sys.exc_info():
+            print e
     sfs.terminate_processes()
+    sys.exit(0)
